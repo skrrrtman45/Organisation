@@ -13,3 +13,7 @@ Kleine Web-App (PWA) fürs iPhone: Aufgaben mit Listen und Fälligkeitsdatum, Tr
 ## Aufs iPhone
 
 Über HTTPS hosten (z. B. GitHub Pages), in Safari öffnen → Teilen → "Zum Home-Bildschirm".
+
+## Bildnachweis
+
+Übungsfotos in `img/ex/` stammen aus der [free-exercise-db](https://github.com/yuhonas/free-exercise-db) (Unlicense / Public Domain).

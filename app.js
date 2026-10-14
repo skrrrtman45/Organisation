@@ -4,8 +4,8 @@
 const KEY = 'organisation-v1';
 const defaults = () => ({
   tasks: [],      // {id, text, list, due, done, created}
-  plan: [],       // {id, name, exercises: [{id, name, sets, reps, weight}]}
-  log: [],        // {id, dayName, start, end, exercises: [{name, sets: [{reps, weight, done}]}]}
+  plan: [],       // {id, name, exercises: [{id, name, sets, reps, weight, photo?}]}
+  log: [],        // {id, dayName, start, end, exercises: [{exId, name, sets: [{reps, weight, done}]}]}
   session: null,  // laufendes Training, gleiche Form wie ein Log-Eintrag
   settings: { rest: 90 },
   food: { goals: { kcal: 2298, p: 160, c: 292, f: 48 }, entries: [] }, // entries: {id, date, name, kcal, p, c, f}
@@ -20,6 +20,27 @@ const START_PLAN = [
   ['Full Body', ['Hürdensitz', 'Fußkreisen', 'Handlauf', 'Beinpresse', 'Beinbeuger im Sitzen', 'Breites Latziehen im neutralen Griff', 'Kurzhantel-Schrägbankdrücken', 'Enger 90/90 Sitz mit Hüftextension', 'Schrauben Mobilisierung', 'Side Stretch']],
 ];
 
+// Fotos aus der free-exercise-db (Public Domain), Name -> [Bild-ID, nur ähnliche Variante?].
+const PHOTOS = {
+  'beinpresse': ['Leg_Press'],
+  'wadenheben an der beinpresse': ['Calf_Press_On_The_Leg_Press_Machine'],
+  'schrägbankdrücken an der multipresse': ['Smith_Machine_Incline_Bench_Press'],
+  'schulterpresse': ['Machine_Shoulder_Military_Press'],
+  'unterarmstütz': ['Plank'],
+  'beinbeuger im liegen': ['Lying_Leg_Curls'],
+  'low row': ['Seated_Cable_Rows', true],
+  'latzug': ['Wide-Grip_Lat_Pulldown'],
+  'butterfly reverse': ['Reverse_Machine_Flyes'],
+  'seitstütz': ['Side_Bridge'],
+  'rückenstrecker maschine': ['Hyperextensions_Back_Extensions', true],
+  'beinbeuger im sitzen': ['Seated_Leg_Curl'],
+  'breites latziehen im neutralen griff': ['Wide-Grip_Lat_Pulldown', true],
+  'kurzhantel-schrägbankdrücken': ['Incline_Dumbbell_Press'],
+  'hürdensitz': ['Seated_Floor_Hamstring_Stretch', true],
+  'fußkreisen': ['Ankle_Circles', true],
+  'handlauf': ['Inchworm'],
+};
+
 let state = load();
 if (!state.seeded && !state.plan.length) {
   state.plan = START_PLAN.map(([name, exs]) => ({
@@ -28,36 +49,55 @@ if (!state.seeded && !state.plan.length) {
 }
 state.seeded = true;
 save();
+
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
     return raw ? Object.assign(defaults(), JSON.parse(raw)) : defaults();
   } catch { return defaults(); }
 }
-function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(state)); }
+  catch { alert('Speicher voll. Entferne eigene Fotos oder exportiere und lösche alte Daten.'); }
+}
 
+// ---------- Helfer ----------
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // Lokales Datum als YYYY-MM-DD (toISOString wäre UTC und nach Mitternacht noch "gestern").
 const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const today = () => ymd(new Date());
 const fmtDate = iso => new Date(typeof iso === 'string' && iso.length === 10 ? iso + 'T12:00' : iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
 const fmtDur = ms => { const s = Math.max(0, Math.floor(ms / 1000)); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; };
+const num = v => parseFloat(String(v).replace(',', '.')) || 0;
+const fmtKg = w => (w === null || w === '' || w === undefined) ? '' : String(w).replace('.', ',');
+
+const ICON = {
+  check: '<svg viewBox="0 0 24 24"><path d="M5 12l5 5L20 7"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+};
 
 // ---------- UI-Zustand (nicht gespeichert) ----------
 let tab = 'tasks';
 let listFilter = 'Alle';
 let showDone = false;
+let gymDay = null;
 let editPlan = false;
 let restEnd = 0;
 let foodDate = today();
+let sheet = null; // {day, ex} für die Detail-Ansicht einer Übung
 
 const view = document.getElementById('view');
 const titles = { tasks: 'Aufgaben', gym: 'Training', food: 'Ernährung', settings: 'Mehr' };
 
 function render() {
-  document.getElementById('title').textContent = titles[tab];
+  document.getElementById('title').textContent = tab === 'gym' && state.session ? state.session.dayName : titles[tab];
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  const action = tab === 'gym' && !state.session ? `<button class="link" data-act="edit-plan">${editPlan ? 'Fertig' : 'Bearbeiten'}</button>`
+    : tab === 'gym' && state.session ? '<button class="btn small" data-act="finish">Beenden</button>' : '';
+  document.getElementById('top-action').innerHTML = action;
   view.innerHTML = tab === 'tasks' ? renderTasks() : tab === 'gym' ? renderGym() : tab === 'food' ? renderFood() : renderSettings();
+  renderSheet();
+  tick();
 }
 
 // ---------- Aufgaben ----------
@@ -70,39 +110,54 @@ function renderTasks() {
   const all = lists();
   if (listFilter !== 'Alle' && !all.includes(listFilter)) listFilter = 'Alle';
   const inList = state.tasks.filter(t => listFilter === 'Alle' || t.list === listFilter);
-  const open = inList.filter(t => !t.done).sort((a, b) => (a.due || '9999') .localeCompare(b.due || '9999') || a.created - b.created);
+  const open = inList.filter(t => !t.done).sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999') || a.created - b.created);
   const done = inList.filter(t => t.done);
 
-  const taskRow = t => {
+  const row = t => {
     const over = t.due && !t.done && t.due < today();
-    return `<div class="task ${t.done ? 'done' : ''}">
-      <input type="checkbox" data-act="toggle" data-id="${t.id}" ${t.done ? 'checked' : ''}>
-      <div class="text">${esc(t.text)}
-        <div class="due ${over ? 'over' : ''}">${listFilter === 'Alle' ? esc(t.list) : ''}${t.due ? ' · ' + fmtDate(t.due) : ''}</div>
-      </div>
-      <button class="btn danger" data-act="del-task" data-id="${t.id}">Löschen</button>
+    const sub = [listFilter === 'Alle' ? esc(t.list) : '', t.due ? `<span class="${over ? 'over' : ''}">${fmtDate(t.due)}</span>` : ''].filter(Boolean).join(' · ');
+    return `<div class="item ${t.done ? 'done' : ''}">
+      <button class="check ${t.done ? 'on' : ''}" data-act="toggle" data-id="${t.id}">${t.done ? ICON.check : ''}</button>
+      <div class="text"><span>${esc(t.text)}</span>${sub ? `<div class="sub">${sub}</div>` : ''}</div>
+      <button class="icon-btn" data-act="del-task" data-id="${t.id}" aria-label="Löschen">${ICON.trash}</button>
     </div>`;
   };
 
   return `
-    <form class="card" id="task-form">
-      <input name="text" placeholder="Neue Aufgabe" autocomplete="off" required>
-      <div class="row" style="margin-top:8px">
-        <input class="grow" name="list" list="lists" placeholder="Liste" value="${listFilter === 'Alle' ? '' : esc(listFilter)}">
-        <input class="grow" name="due" type="date">
-        <button class="btn">+</button>
-      </div>
-      <datalist id="lists">${all.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
+    <form class="adder" id="task-form">
+      <input name="text" placeholder="Neue Aufgabe …" autocomplete="off" required>
+      <button class="btn">+</button>
     </form>
+    <div class="adder-extra">
+      <input form="task-form" name="list" list="lists" placeholder="Liste" value="${listFilter === 'Alle' ? '' : esc(listFilter)}">
+      <input form="task-form" name="due" type="date">
+    </div>
+    <datalist id="lists">${all.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
     <div class="chips">${['Alle', ...all].map(l => `<button class="chip ${l === listFilter ? 'active' : ''}" data-act="filter" data-list="${esc(l)}">${esc(l)}</button>`).join('')}</div>
-    <div class="card">${open.length ? open.map(taskRow).join('') : '<div class="empty">Nichts offen.</div>'}</div>
+    <div class="card">${open.length ? open.map(row).join('') : '<div class="empty">Alles erledigt.</div>'}</div>
     ${done.length ? `
-      <div class="row"><button class="link grow" style="text-align:left" data-act="show-done">${showDone ? 'Erledigte ausblenden' : `Erledigt (${done.length}) anzeigen`}</button>
-      ${showDone ? '<button class="btn danger" data-act="clear-done">Alle entfernen</button>' : ''}</div>
-      ${showDone ? `<div class="card">${done.map(taskRow).join('')}</div>` : ''}` : ''}`;
+      <div class="section"><h2>Erledigt · ${done.length}</h2>
+        <div><button class="link" data-act="show-done">${showDone ? 'Ausblenden' : 'Anzeigen'}</button>
+        ${showDone ? ' <button class="link" style="color:var(--danger)" data-act="clear-done">Leeren</button>' : ''}</div></div>
+      ${showDone ? `<div class="card">${done.map(row).join('')}</div>` : ''}` : ''}`;
 }
 
 // ---------- Training ----------
+const findEx = (dayId, exId) => state.plan.find(d => d.id === dayId)?.exercises.find(e => e.id === exId);
+
+function photos(e) {
+  if (!e) return null;
+  if (e.photo) return { imgs: [e.photo], own: true };
+  const p = PHOTOS[e.name.trim().toLowerCase()];
+  return p ? { imgs: [`img/ex/${p[0]}-0.jpg`, `img/ex/${p[0]}-1.jpg`], similar: !!p[1] } : null;
+}
+
+function thumb(e, dayId) {
+  const p = photos(e);
+  const initials = esc((e.name.match(/\p{L}/gu) || ['?']).slice(0, 2).join('').toUpperCase());
+  return `<button class="thumb" data-act="detail" data-day="${dayId}" data-ex="${e.id}">${p ? `<img src="${p.imgs[0]}" alt="" loading="lazy">` : initials}</button>`;
+}
+
 function lastFor(name) {
   for (let i = state.log.length - 1; i >= 0; i--) {
     const ex = state.log[i].exercises.find(e => e.name.toLowerCase() === name.toLowerCase());
@@ -114,180 +169,248 @@ function lastFor(name) {
 
 function renderGym() {
   if (state.session) return renderSession();
-  if (editPlan) return renderPlanEditor();
+  if (!state.plan.find(d => d.id === gymDay)) gymDay = state.plan[0]?.id ?? null;
+  const day = state.plan.find(d => d.id === gymDay);
+  const chips = `<div class="chips">${state.plan.map(d => `<button class="chip ${d.id === gymDay ? 'active' : ''}" data-act="pick-day" data-day="${d.id}">${esc(d.name)}</button>`).join('')}
+    ${editPlan ? '<button class="chip" data-act="add-day">+ Tag</button>' : ''}</div>`;
 
-  const days = state.plan.map(d => `
-    <div class="card">
-      <div class="row"><h3 class="grow">${esc(d.name)}</h3><button class="btn" data-act="start" data-id="${d.id}">Starten</button></div>
-      ${d.exercises.map(e => `<div class="muted">${esc(e.name)} – ${e.sets}×${esc(e.reps || '?')}${e.weight ? ` @ ${e.weight} kg` : ''}</div>`).join('') || '<div class="muted">Keine Übungen</div>'}
+  if (!day) return `${chips}<div class="card empty">Noch kein Trainingstag. Tippe oben auf „Bearbeiten“.</div>`;
+  if (editPlan) return chips + renderDayEditor(day);
+
+  const rows = day.exercises.map(e => `
+    <div class="item">
+      ${thumb(e, day.id)}
+      <div class="text"><span>${esc(e.name)}</span><div class="sub">${e.sets} × ${esc(e.reps || '?')}</div></div>
+      <div class="stepper">
+        <button data-act="w-" data-day="${day.id}" data-ex="${e.id}" aria-label="weniger">−</button>
+        <input data-field="w" data-day="${day.id}" data-ex="${e.id}" value="${fmtKg(e.weight)}" placeholder="–" inputmode="decimal">
+        <span>kg</span>
+        <button data-act="w+" data-day="${day.id}" data-ex="${e.id}" aria-label="mehr">+</button>
+      </div>
     </div>`).join('');
 
-  const hist = state.log.slice(-10).reverse().map(l => {
+  const hist = state.log.slice(-8).reverse().map(l => {
     const sets = l.exercises.reduce((n, e) => n + e.sets.filter(s => s.done).length, 0);
-    return `<div class="task"><div class="text">${esc(l.dayName)}<div class="due">${fmtDate(l.start)} · ${fmtDur(l.end - l.start)} min · ${sets} Sätze</div></div>
-      <button class="btn danger" data-act="del-log" data-id="${l.id}">Löschen</button></div>`;
+    return `<div class="item"><div class="text"><span>${esc(l.dayName)}</span><div class="sub">${fmtDate(l.start)} · ${fmtDur(l.end - l.start)} min · ${sets} Sätze</div></div>
+      <button class="icon-btn" data-act="del-log" data-id="${l.id}" aria-label="Löschen">${ICON.trash}</button></div>`;
   }).join('');
 
-  return `
-    ${days || '<div class="card empty">Noch kein Trainingsplan. Tippe auf „Plan bearbeiten“.</div>'}
-    <button class="btn secondary full" data-act="edit-plan">Plan bearbeiten</button>
-    ${hist ? `<h2>Verlauf</h2><div class="card">${hist}</div>` : ''}`;
+  return `${chips}
+    <div class="card">${rows || '<div class="empty">Keine Übungen. Tippe auf „Bearbeiten“.</div>'}</div>
+    ${day.exercises.length ? `<button class="btn full" data-act="start" data-day="${day.id}">${esc(day.name)} starten</button>` : ''}
+    ${hist ? `<div class="section"><h2>Verlauf</h2></div><div class="card">${hist}</div>` : ''}`;
 }
 
-function renderPlanEditor() {
-  const days = state.plan.map(d => `
+function renderDayEditor(day) {
+  return `
+    <div class="card pad row">
+      <input class="grow" data-field="day-name" data-day="${day.id}" value="${esc(day.name)}" placeholder="Name des Tags">
+      <button class="icon-btn danger" data-act="del-day" data-day="${day.id}" aria-label="Tag löschen">${ICON.trash}</button>
+    </div>
     <div class="card">
-      <div class="row"><input class="grow" data-field="day-name" data-day="${d.id}" value="${esc(d.name)}" placeholder="Name des Tags">
-        <button class="btn danger" data-act="del-day" data-day="${d.id}">Löschen</button></div>
-      <div class="muted" style="margin:8px 0 2px">Übung · Sätze · Wdh. · kg</div>
-      ${d.exercises.map(e => `
-        <div class="row" style="margin-bottom:6px">
-          <input class="grow" data-field="name" data-day="${d.id}" data-ex="${e.id}" value="${esc(e.name)}" placeholder="Übung">
-          <input class="num" data-field="sets" data-day="${d.id}" data-ex="${e.id}" value="${e.sets}" inputmode="numeric">
-          <input class="num" data-field="reps" data-day="${d.id}" data-ex="${e.id}" value="${esc(e.reps)}" placeholder="8-10">
-          <input class="num" data-field="weight" data-day="${d.id}" data-ex="${e.id}" value="${e.weight ?? ''}" inputmode="decimal">
-          <button class="btn danger" data-act="del-ex" data-day="${d.id}" data-ex="${e.id}">×</button>
+      <div class="edit-grid" style="padding-bottom:0"><span class="muted">Übung</span><span class="muted" style="text-align:center">Sätze</span><span class="muted" style="text-align:center">Wdh.</span><span></span></div>
+      ${day.exercises.map(e => `
+        <div class="edit-grid">
+          <input data-field="name" data-day="${day.id}" data-ex="${e.id}" value="${esc(e.name)}" placeholder="Übung">
+          <input class="c" data-field="sets" data-day="${day.id}" data-ex="${e.id}" value="${e.sets}" inputmode="numeric">
+          <input class="c" data-field="reps" data-day="${day.id}" data-ex="${e.id}" value="${esc(e.reps)}" placeholder="8-12">
+          <button class="icon-btn danger" data-act="del-ex" data-day="${day.id}" data-ex="${e.id}" aria-label="Übung löschen">${ICON.trash}</button>
         </div>`).join('')}
-      <button class="link" data-act="add-ex" data-day="${d.id}">+ Übung</button>
-    </div>`).join('');
-
-  return `${days}
-    <button class="btn secondary full" data-act="add-day">+ Trainingstag</button>
-    <div style="height:10px"></div>
-    <button class="btn full" data-act="edit-plan">Fertig</button>`;
+    </div>
+    <button class="btn secondary full" data-act="add-ex" data-day="${day.id}">+ Übung</button>
+    <p class="muted">Gewichte stellst du nach „Fertig“ direkt in der Übersicht ein. Tippe auf ein Bild für Details oder ein eigenes Foto.</p>`;
 }
 
 function renderSession() {
   const s = state.session;
   const exs = s.exercises.map((e, ei) => {
     const last = lastFor(e.name);
-    return `<div class="card">
-      <h3>${esc(e.name)}</h3>
-      <div class="muted">Ziel: ${e.target}${last ? ` · Letztes Mal: ${last.map(x => `${x.reps}×${x.weight}`).join(', ')}` : ''}</div>
-      ${e.sets.map((st, si) => `
-        <div class="set ${st.done ? 'done' : ''}">
-          <span class="label">Satz ${si + 1}</span>
-          <input class="num" data-field="s-reps" data-ei="${ei}" data-si="${si}" value="${st.reps}" placeholder="Wdh." inputmode="numeric">
-          <span class="muted">×</span>
-          <input class="num" data-field="s-weight" data-ei="${ei}" data-si="${si}" value="${st.weight}" placeholder="kg" inputmode="decimal">
-          <span class="muted grow">kg</span>
-          <input type="checkbox" data-act="set-done" data-ei="${ei}" data-si="${si}" ${st.done ? 'checked' : ''}>
-        </div>`).join('')}
-      <div class="row"><button class="link" data-act="add-set" data-ei="${ei}">+ Satz</button></div>
+    const planEx = findEx(s.dayId, e.exId) || { id: '', name: e.name };
+    return `<div class="card pad">
+      <div class="row">
+        ${thumb(planEx, s.dayId)}
+        <div class="grow"><h3>${esc(e.name)}</h3>
+          <div class="muted">Ziel ${esc(e.target)}${last ? ` · Zuletzt ${last.map(x => `${fmtKg(x.weight) || '–'}×${x.reps || '?'}`).join(' ')}` : ''}</div></div>
+      </div>
+      <div class="sets">
+        <span class="h">#</span><span class="h">kg</span><span class="h">Wdh.</span><span></span>
+        ${e.sets.map((st, si) => `
+          <span class="n">${si + 1}</span>
+          <input class="${st.done ? 'done' : ''}" data-field="s-weight" data-ei="${ei}" data-si="${si}" value="${fmtKg(st.weight)}" placeholder="–" inputmode="decimal">
+          <input class="${st.done ? 'done' : ''}" data-field="s-reps" data-ei="${ei}" data-si="${si}" value="${st.reps}" placeholder="${esc(e.target.split('×')[1] || '')}" inputmode="numeric">
+          <button class="check ${st.done ? 'on' : ''}" data-act="set-done" data-ei="${ei}" data-si="${si}">${st.done ? ICON.check : ''}</button>`).join('')}
+      </div>
+      <button class="link" style="padding:0 0 2px" data-act="add-set" data-ei="${ei}">+ Satz</button>
     </div>`;
   }).join('');
 
   return `
-    <div class="card row">
-      <div class="grow"><h3>${esc(s.dayName)}</h3><div class="muted">Dauer <span class="js-elapsed">${fmtDur(Date.now() - s.start)}</span></div></div>
-      <div class="timer js-rest">${restEnd > Date.now() ? fmtDur(restEnd - Date.now()) : ''}</div>
+    <div class="card session-head">
+      <div class="grow"><div class="muted">Dauer</div><div class="big js-elapsed">${fmtDur(Date.now() - s.start)}</div></div>
+      <div class="muted" style="text-align:right">${s.exercises.reduce((n, e) => n + e.sets.filter(x => x.done).length, 0)} / ${s.exercises.reduce((n, e) => n + e.sets.length, 0)}<br>Sätze</div>
     </div>
     ${exs}
     <button class="btn full" data-act="finish">Training beenden</button>
-    <div style="height:10px"></div>
-    <button class="btn secondary full" data-act="cancel">Abbrechen (nicht speichern)</button>`;
+    <div class="spacer"></div>
+    <button class="btn secondary full" data-act="cancel">Verwerfen</button>`;
 }
 
 function startSession(dayId) {
   const d = state.plan.find(x => x.id === dayId);
   state.session = {
-    id: uid(), dayName: d.name, start: Date.now(),
+    id: uid(), dayId, dayName: d.name, start: Date.now(),
     exercises: d.exercises.map(e => {
       const last = lastFor(e.name);
-      const w = last ? last[last.length - 1].weight : (e.weight ?? '');
-      return { name: e.name, target: `${e.sets}×${e.reps || '?'}`, sets: Array.from({ length: Number(e.sets) || 1 }, () => ({ reps: '', weight: w, done: false })) };
+      const w = e.weight ?? (last ? last[last.length - 1].weight : '');
+      return { exId: e.id, name: e.name, target: `${e.sets}×${e.reps || '?'}`, sets: Array.from({ length: Number(e.sets) || 1 }, () => ({ reps: '', weight: w ?? '', done: false })) };
     }),
   };
 }
 
+function finishSession() {
+  const s = state.session;
+  s.end = Date.now();
+  // Zuletzt benutztes Gewicht in den Plan übernehmen, damit es beim nächsten Mal vorbelegt ist.
+  for (const e of s.exercises) {
+    const done = e.sets.filter(x => x.done && x.weight !== '');
+    const planEx = findEx(s.dayId, e.exId);
+    if (planEx && done.length) planEx.weight = num(done[done.length - 1].weight);
+  }
+  state.log.push(s);
+  state.session = null;
+  restEnd = 0;
+}
+
+// Detail-Ansicht einer Übung mit großen Bildern und eigenem Foto.
+function renderSheet() {
+  const el = document.getElementById('sheet');
+  const e = sheet && findEx(sheet.day, sheet.ex);
+  if (!e) { el.hidden = true; el.innerHTML = ''; return; }
+  const p = photos(e);
+  el.hidden = false;
+  el.innerHTML = `<div class="panel">
+    <div class="row"><h3 class="grow">${esc(e.name)}</h3><button class="link" data-act="close-sheet">Schließen</button></div>
+    <div class="muted">${e.sets} × ${esc(e.reps || '?')}${e.weight != null ? ` · ${fmtKg(e.weight)} kg` : ''}
+      ${p?.similar ? ' <span class="badge">Bild zeigt ähnliche Variante</span>' : ''}${p?.own ? ' <span class="badge">Eigenes Foto</span>' : ''}</div>
+    ${p ? `<div class="imgs">${p.imgs.map(src => `<img src="${src}" alt="">`).join('')}</div>` : '<div class="empty">Kein Bild vorhanden.</div>'}
+    <div class="row">
+      <label class="btn secondary grow" style="text-align:center">${e.photo ? 'Foto ersetzen' : 'Eigenes Foto'}<input type="file" accept="image/*" id="photo-input" hidden></label>
+      ${e.photo ? '<button class="btn secondary" data-act="del-photo">Entfernen</button>' : ''}
+    </div>
+  </div>`;
+}
+
+function resizeImage(file, max = 480) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      resolve(c.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
 // ---------- Ernährung ----------
-const MACROS = [['kcal', 'Kcal', ''], ['p', 'Protein', 'g'], ['c', 'KH', 'g'], ['f', 'Fett', 'g']];
-const num = v => parseFloat(String(v).replace(',', '.')) || 0;
+const MACROS = [['p', 'Protein'], ['c', 'Kohlenhydrate'], ['f', 'Fett']];
 
 function renderFood() {
   const { goals, entries } = state.food;
   const day = entries.filter(x => x.date === foodDate);
   const sum = k => day.reduce((n, x) => n + x[k], 0);
   const shift = n => { const d = new Date(foodDate + 'T12:00'); d.setDate(d.getDate() + n); return ymd(d); };
+  const kcal = Math.round(sum('kcal')), left = Math.round(goals.kcal - kcal);
 
   // Zuletzt gegessen: letzte Version je Name, für schnelles Hinzufügen.
   const recent = [];
   for (let i = entries.length - 1; i >= 0 && recent.length < 12; i--)
     if (!recent.some(r => r.name.toLowerCase() === entries[i].name.toLowerCase())) recent.push(entries[i]);
 
-  const bars = MACROS.map(([k, label, unit]) => {
-    const v = Math.round(sum(k)), g = goals[k] || 0, pct = g ? Math.min(100, v / g * 100) : 0;
-    return `<div class="macro"><div class="row"><span class="grow">${label}</span><span class="${g && v > g ? 'over' : ''}">${v} / ${g}${unit}</span></div>
-      <div class="bar"><div style="width:${pct}%"></div></div></div>`;
-  }).join('');
+  const bar = (v, g, h = 5) => `<div class="bar" style="height:${h}px"><div style="width:${g ? Math.min(100, v / g * 100) : 0}%"></div></div>`;
 
   return `
-    <div class="card row">
-      <button class="btn secondary" data-act="food-day" data-date="${shift(-1)}">‹</button>
-      <button class="link grow" data-act="food-day" data-date="${today()}">${foodDate === today() ? 'Heute' : fmtDate(foodDate)}</button>
-      <button class="btn secondary" data-act="food-day" data-date="${shift(1)}">›</button>
+    <div class="chips" style="justify-content:space-between;align-items:center">
+      <button class="chip" data-act="food-day" data-date="${shift(-1)}">‹</button>
+      <button class="chip active" data-act="food-day" data-date="${today()}">${foodDate === today() ? 'Heute' : fmtDate(foodDate)}</button>
+      <button class="chip" data-act="food-day" data-date="${shift(1)}">›</button>
     </div>
-    <div class="card">${bars}<div class="muted" style="margin-top:6px">Übrig: ${Math.round(goals.kcal - sum('kcal'))} kcal</div></div>
-    <form class="card" id="food-form">
+    <div class="card pad macro">
+      <div class="row"><div class="kcal grow"><b>${left}</b><span class="muted">kcal übrig</span></div><span class="muted">${kcal} / ${goals.kcal}</span></div>
+      ${bar(kcal, goals.kcal, 7)}
+      <div class="ring-row">${MACROS.map(([k, label]) => {
+        const v = Math.round(sum(k)), g = goals[k] || 0;
+        return `<div><div class="muted">${label}</div><div class="v ${g && v > g ? 'over' : ''}">${v} / ${g} g</div>${bar(v, g)}</div>`;
+      }).join('')}</div>
+    </div>
+    <form class="card pad" id="food-form">
       <input name="name" placeholder="Mahlzeit" autocomplete="off" required>
-      <div class="row" style="margin-top:8px">
-        ${MACROS.map(([k, label]) => `<input class="grow" name="${k}" placeholder="${label}" inputmode="decimal">`).join('')}
+      <div class="food-grid">
+        <input name="kcal" placeholder="kcal" inputmode="decimal">
+        <input name="p" placeholder="P (g)" inputmode="decimal">
+        <input name="c" placeholder="KH (g)" inputmode="decimal">
+        <input name="f" placeholder="F (g)" inputmode="decimal">
       </div>
-      <button class="btn full" style="margin-top:8px">Hinzufügen</button>
+      <div class="spacer"></div>
+      <button class="btn full">Hinzufügen</button>
     </form>
     ${recent.length ? `<div class="chips">${recent.map(r => `<button class="chip" data-act="food-again" data-id="${r.id}">+ ${esc(r.name)}</button>`).join('')}</div>` : ''}
-    <div class="card">${day.length ? day.map(x => `<div class="task"><div class="text">${esc(x.name)}
-      <div class="due">${Math.round(x.kcal)} kcal · P ${x.p} · K ${x.c} · F ${x.f}</div></div>
-      <button class="btn danger" data-act="del-food" data-id="${x.id}">Löschen</button></div>`).join('') : '<div class="empty">Noch nichts eingetragen.</div>'}</div>`;
+    <div class="card">${day.length ? day.map(x => `<div class="item"><div class="text"><span>${esc(x.name)}</span>
+      <div class="sub">${Math.round(x.kcal)} kcal · P ${x.p} · KH ${x.c} · F ${x.f}</div></div>
+      <button class="icon-btn" data-act="del-food" data-id="${x.id}" aria-label="Löschen">${ICON.trash}</button></div>`).join('') : '<div class="empty">Noch nichts eingetragen.</div>'}</div>`;
 }
 
 // ---------- Mehr ----------
 function renderSettings() {
+  const g = state.food.goals;
   return `
-    <div class="card">
-      <h3>Tagesziel Ernährung</h3>
-      <div class="row">${MACROS.map(([k, label, unit]) => `<label class="grow muted">${label}${unit ? ' (' + unit + ')' : ''}<input data-field="goal-${k}" value="${state.food.goals[k]}" inputmode="decimal"></label>`).join('')}</div>
+    <div class="section"><h2>Tagesziel Ernährung</h2></div>
+    <div class="card pad food-grid" style="margin-top:0">
+      ${[['kcal', 'kcal'], ['p', 'P (g)'], ['c', 'KH (g)'], ['f', 'F (g)']].map(([k, l]) => `<label class="muted">${l}<input data-field="goal-${k}" value="${g[k]}" inputmode="decimal" style="margin-top:4px;text-align:center"></label>`).join('')}
     </div>
-    <div class="card">
-      <h3>Pausentimer</h3>
-      <div class="row"><input class="num" data-field="rest" value="${state.settings.rest}" inputmode="numeric"><span class="muted">Sekunden nach jedem abgehakten Satz</span></div>
+    <div class="section"><h2>Training</h2></div>
+    <div class="card pad row">
+      <span class="grow">Pausentimer (Sekunden)</span>
+      <input class="num" data-field="rest" value="${state.settings.rest}" inputmode="numeric">
     </div>
-    <div class="card">
-      <h3>Backup</h3>
-      <p class="muted">Daten liegen nur auf diesem Gerät (im Browser). Löscht du die Website-Daten in Safari, sind sie weg. Exportiere regelmäßig.</p>
-      <button class="btn" data-act="export">Exportieren</button>
-      <label class="btn secondary" style="display:inline-block;margin-left:6px">Importieren<input type="file" accept="application/json" id="import" hidden></label>
+    <div class="section"><h2>Backup</h2></div>
+    <div class="card pad">
+      <p class="muted" style="margin-top:0">Daten liegen nur auf diesem Gerät. Löschst du die Website-Daten in Safari, sind sie weg. Exportiere regelmäßig.</p>
+      <div class="row">
+        <button class="btn grow" data-act="export">Exportieren</button>
+        <label class="btn secondary grow" style="text-align:center">Importieren<input type="file" accept="application/json" id="import" hidden></label>
+      </div>
     </div>
-    <div class="card">
-      <h3>Installieren</h3>
-      <p class="muted">Safari → Teilen → „Zum Home-Bildschirm“. Danach startet die App im Vollbild und funktioniert offline.</p>
-    </div>`;
+    <div class="section"><h2>Installieren</h2></div>
+    <div class="card pad muted">Safari → Teilen → „Zum Home-Bildschirm“. Danach startet die App im Vollbild und funktioniert offline.</div>
+    <p class="muted">Übungsbilder: free-exercise-db (Public Domain).</p>`;
 }
 
 // ---------- Events ----------
 document.querySelector('.tabs').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
-  tab = b.dataset.tab; render(); window.scrollTo(0, 0);
+  tab = b.dataset.tab; sheet = null; render(); window.scrollTo(0, 0);
 });
 
 view.addEventListener('submit', e => {
-  if (e.target.id === 'food-form') {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    state.food.entries.push({ id: uid(), date: foodDate, name: f.get('name').trim(), kcal: num(f.get('kcal')), p: num(f.get('p')), c: num(f.get('c')), f: num(f.get('f')) });
-    save(); render(); return;
-  }
-  if (e.target.id !== 'task-form') return;
   e.preventDefault();
   const f = new FormData(e.target);
-  const text = f.get('text').trim(); if (!text) return;
-  const list = f.get('list').trim() || 'Allgemein';
-  state.tasks.push({ id: uid(), text, list, due: f.get('due') || '', done: false, created: Date.now() });
+  if (e.target.id === 'food-form') {
+    state.food.entries.push({ id: uid(), date: foodDate, name: f.get('name').trim(), kcal: num(f.get('kcal')), p: num(f.get('p')), c: num(f.get('c')), f: num(f.get('f')) });
+  } else if (e.target.id === 'task-form') {
+    const text = f.get('text').trim(); if (!text) return;
+    state.tasks.push({ id: uid(), text, list: f.get('list').trim() || 'Allgemein', due: f.get('due') || '', done: false, created: Date.now() });
+  } else return;
   save(); render();
-  view.querySelector('input[name=text]').focus();
+  view.querySelector('input[name=text], input[name=name]')?.focus();
 });
 
-view.addEventListener('click', e => {
+document.addEventListener('click', e => {
+  if (e.target.id === 'sheet') { sheet = null; renderSheet(); return; } // Tipp auf den Hintergrund schließt
   const el = e.target.closest('[data-act]'); if (!el) return;
   const { act, id, day, ex } = el.dataset;
   const d = day && state.plan.find(x => x.id === day);
@@ -297,34 +420,41 @@ view.addEventListener('click', e => {
     case 'filter': listFilter = el.dataset.list; break;
     case 'show-done': showDone = !showDone; break;
     case 'clear-done':
-      if (!confirm('Alle erledigten Aufgaben entfernen?')) return;
+      if (!confirm('Erledigte Aufgaben entfernen?')) return;
       state.tasks = state.tasks.filter(t => !(t.done && (listFilter === 'Alle' || t.list === listFilter))); break;
+
+    case 'pick-day': gymDay = day; break;
     case 'edit-plan': editPlan = !editPlan; break;
-    case 'add-day': state.plan.push({ id: uid(), name: `Tag ${state.plan.length + 1}`, exercises: [] }); break;
+    case 'add-day': { const nd = { id: uid(), name: `Tag ${state.plan.length + 1}`, exercises: [] }; state.plan.push(nd); gymDay = nd.id; break; }
     case 'del-day': if (!confirm(`„${d.name}“ löschen?`)) return; state.plan = state.plan.filter(x => x !== d); break;
-    case 'add-ex': d.exercises.push({ id: uid(), name: '', sets: 3, reps: '10', weight: null }); break;
+    case 'add-ex': d.exercises.push({ id: uid(), name: '', sets: 4, reps: '8-12', weight: null }); break;
     case 'del-ex': d.exercises = d.exercises.filter(x => x.id !== ex); break;
-    case 'start':
-      if (!state.plan.find(x => x.id === id).exercises.length) { alert('Dieser Tag hat noch keine Übungen.'); return; }
-      startSession(id); break;
+    case 'w-': case 'w+': {
+      const e2 = findEx(day, ex);
+      e2.weight = Math.max(0, Math.round(((e2.weight || 0) + (act === 'w+' ? 2.5 : -2.5)) * 10) / 10); break;
+    }
+    case 'detail': if (!findEx(day, ex)) return; sheet = { day, ex }; renderSheet(); return;
+    case 'close-sheet': sheet = null; renderSheet(); return;
+    case 'del-photo': delete findEx(sheet.day, sheet.ex).photo; break;
+
+    case 'start': startSession(day); window.scrollTo(0, 0); break;
     case 'set-done': {
       const st = state.session.exercises[el.dataset.ei].sets[el.dataset.si];
-      st.done = el.checked;
-      if (st.done && state.settings.rest > 0) restEnd = Date.now() + state.settings.rest * 1000;
+      st.done = !st.done;
+      restEnd = st.done && state.settings.rest > 0 ? Date.now() + state.settings.rest * 1000 : restEnd;
       break;
     }
     case 'add-set': {
       const sets = state.session.exercises[el.dataset.ei].sets;
-      const prev = sets[sets.length - 1];
-      sets.push({ reps: '', weight: prev ? prev.weight : '', done: false }); break;
+      sets.push({ reps: '', weight: sets.length ? sets[sets.length - 1].weight : '', done: false }); break;
     }
-    case 'finish': {
-      const s = state.session;
-      if (!s.exercises.some(x => x.sets.some(st => st.done)) && !confirm('Kein Satz abgehakt. Trotzdem speichern?')) return;
-      s.end = Date.now(); state.log.push(s); state.session = null; restEnd = 0; break;
-    }
+    case 'skip-rest': restEnd = 0; tick(); return;
+    case 'finish':
+      if (!state.session.exercises.some(x => x.sets.some(st => st.done)) && !confirm('Kein Satz abgehakt. Trotzdem speichern?')) return;
+      finishSession(); break;
     case 'cancel': if (!confirm('Training verwerfen?')) return; state.session = null; restEnd = 0; break;
     case 'del-log': if (!confirm('Eintrag löschen?')) return; state.log = state.log.filter(x => x.id !== id); break;
+
     case 'food-day': foodDate = el.dataset.date; break;
     case 'food-again': {
       const src = state.food.entries.find(x => x.id === id);
@@ -338,7 +468,7 @@ view.addEventListener('click', e => {
 });
 
 // Eingabefelder speichern ohne Neu-Rendern (Fokus bleibt erhalten).
-view.addEventListener('input', e => {
+document.addEventListener('input', e => {
   const el = e.target, f = el.dataset.field; if (!f) return;
   const v = el.value;
   if (f.startsWith('goal-')) state.food.goals[f.slice(5)] = num(v);
@@ -348,23 +478,27 @@ view.addEventListener('input', e => {
     const st = state.session.exercises[el.dataset.ei].sets[el.dataset.si];
     st[f === 's-reps' ? 'reps' : 'weight'] = v.replace(',', '.');
   } else {
-    const e2 = state.plan.find(x => x.id === el.dataset.day).exercises.find(x => x.id === el.dataset.ex);
-    if (f === 'sets') e2.sets = Math.max(1, parseInt(v) || 1);
-    else if (f === 'weight') e2.weight = v === '' ? null : parseFloat(v.replace(',', '.'));
+    const e2 = findEx(el.dataset.day, el.dataset.ex);
+    if (f === 'w') e2.weight = v.trim() === '' ? null : num(v);
+    else if (f === 'sets') e2.sets = Math.max(1, parseInt(v) || 1);
     else e2[f] = v;
   }
   save();
 });
 
-view.addEventListener('change', e => {
-  if (e.target.id !== 'import') return;
-  const file = e.target.files[0]; if (!file) return;
-  file.text().then(txt => {
-    const data = JSON.parse(txt);
-    if (!Array.isArray(data.tasks) || !Array.isArray(data.plan)) throw new Error();
-    if (!confirm('Aktuelle Daten durch das Backup ersetzen?')) return;
-    state = Object.assign(defaults(), data); save(); render(); alert('Import fertig.');
-  }).catch(() => alert('Datei ist kein gültiges Backup.'));
+document.addEventListener('change', async e => {
+  const file = e.target.files?.[0]; if (!file) return;
+  if (e.target.id === 'photo-input' && sheet) {
+    try { findEx(sheet.day, sheet.ex).photo = await resizeImage(file); save(); render(); }
+    catch { alert('Foto konnte nicht geladen werden.'); }
+  } else if (e.target.id === 'import') {
+    try {
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data.tasks) || !Array.isArray(data.plan)) throw new Error();
+      if (!confirm('Aktuelle Daten durch das Backup ersetzen?')) return;
+      state = Object.assign(defaults(), data); save(); render(); alert('Import fertig.');
+    } catch { alert('Datei ist kein gültiges Backup.'); }
+  }
 });
 
 async function exportData() {
@@ -379,17 +513,21 @@ async function exportData() {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// Laufende Uhren im Training aktualisieren.
-setInterval(() => {
-  if (!state.session) return;
+// Laufende Uhren: Trainingsdauer und Pausentimer.
+function tick() {
+  const restEl = document.getElementById('rest');
+  if (!state.session) { restEl.hidden = true; return; }
   const el = document.querySelector('.js-elapsed'); if (el) el.textContent = fmtDur(Date.now() - state.session.start);
-  const r = document.querySelector('.js-rest');
-  if (r) {
-    const left = restEnd - Date.now();
-    r.textContent = left > 0 ? fmtDur(left) : (restEnd ? 'Los!' : '');
-    if (left <= 0 && restEnd && navigator.vibrate) { navigator.vibrate(300); restEnd = 0; }
+  const left = restEnd - Date.now();
+  if (left > 0) {
+    restEl.hidden = false;
+    restEl.innerHTML = `Pause ${fmtDur(left)} <button data-act="skip-rest">Überspringen</button>`;
+  } else {
+    if (restEnd && navigator.vibrate) navigator.vibrate(300);
+    restEnd = 0; restEl.hidden = true;
   }
-}, 500);
+}
+setInterval(tick, 500);
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 if (state.session) tab = 'gym';
