@@ -13,8 +13,7 @@ const defaults = () => ({
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
-// Startplan aus den Screenshots. Sätze/Wdh./Gewichte fehlen noch ("Krafttest"),
-// daher nur Platzhalter: 3 Sätze, Wiederholungen leer.
+// Startplan aus den Screenshots: alle Übungen 4 Sätze à 8-12 Wiederholungen, Gewicht offen.
 const START_PLAN = [
   ['Push', ['Beinpresse', 'Wadenheben an der Beinpresse', 'Schrägbankdrücken an der Multipresse', 'Schulterpresse', 'Unterarmstütz']],
   ['Pull', ['Beinbeuger im Liegen', 'Low Row', 'Latzug', 'Butterfly Reverse', 'Seitstütz', 'Rückenstrecker Maschine']],
@@ -24,7 +23,7 @@ const START_PLAN = [
 let state = load();
 if (!state.seeded && !state.plan.length) {
   state.plan = START_PLAN.map(([name, exs]) => ({
-    id: uid(), name, exercises: exs.map(n => ({ id: uid(), name: n, sets: 3, reps: '', weight: null })),
+    id: uid(), name, exercises: exs.map(n => ({ id: uid(), name: n, sets: 4, reps: '8-12', weight: null })),
   }));
 }
 state.seeded = true;
