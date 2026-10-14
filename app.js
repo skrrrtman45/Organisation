@@ -9,6 +9,10 @@ const defaults = () => ({
   session: null,  // laufendes Training, gleiche Form wie ein Log-Eintrag
   settings: { rest: 90 },
   food: { goals: { kcal: 2298, p: 160, c: 292, f: 48 }, entries: [] }, // entries: {id, date, name, kcal, p, c, f}
+  chores: [],     // wiederkehrend: {id, name, every (Tage), last (YYYY-MM-DD|null), prev}
+  habits: [],     // täglich: {id, name}
+  habitLog: {},   // {YYYY-MM-DD: [habitId]}
+  visits: [],     // manuell eingetragene Gym-Besuche (YYYY-MM-DD), zusätzlich zu den Trainings im Verlauf
 });
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -41,7 +45,16 @@ const PHOTOS = {
   'handlauf': ['Inchworm'],
 };
 
+// Startwerte für den Haushaltsplan, Intervalle in Tagen (änderbar unter „Bearbeiten“).
+const START_CHORES = [['Wäsche machen', 7], ['Aufräumen', 3], ['Staubsaugen', 7], ['Wischen', 14], ['Bettzeug waschen', 14], ['Badezimmer putzen', 7]];
+const START_HABITS = ['30 Minuten lesen', 'Lernen / Uni'];
+
 let state = load();
+if (!state.routinesSeeded) {
+  if (!state.chores.length) state.chores = START_CHORES.map(([name, every]) => ({ id: uid(), name, every, last: null }));
+  if (!state.habits.length) state.habits = START_HABITS.map(name => ({ id: uid(), name }));
+  state.routinesSeeded = true;
+}
 if (!state.seeded && !state.plan.length) {
   state.plan = START_PLAN.map(([name, exs]) => ({
     id: uid(), name, exercises: exs.map(n => ({ id: uid(), name: n, sets: 4, reps: '8-12', weight: null })),
@@ -68,6 +81,8 @@ const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')
 const today = () => ymd(new Date());
 const fmtDate = iso => new Date(typeof iso === 'string' && iso.length === 10 ? iso + 'T12:00' : iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
 const fmtDur = ms => { const s = Math.max(0, Math.floor(ms / 1000)); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; };
+const daysBetween = (a, b) => Math.round((new Date(b + 'T12:00') - new Date(a + 'T12:00')) / 864e5);
+const addDays = (iso, n) => { const d = new Date(iso + 'T12:00'); d.setDate(d.getDate() + n); return ymd(d); };
 const num = v => parseFloat(String(v).replace(',', '.')) || 0;
 const fmtKg = w => (w === null || w === '' || w === undefined) ? '' : String(w).replace('.', ',');
 
@@ -82,6 +97,7 @@ let listFilter = 'Alle';
 let showDone = false;
 let gymDay = null;
 let editPlan = false;
+let editRoutines = false;
 let restEnd = 0;
 let foodDate = today();
 let sheet = null; // {day, ex} für die Detail-Ansicht einer Übung
@@ -92,7 +108,8 @@ const titles = { tasks: 'Aufgaben', gym: 'Training', food: 'Ernährung', setting
 function render() {
   document.getElementById('title').textContent = tab === 'gym' && state.session ? state.session.dayName : titles[tab];
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  const action = tab === 'gym' && !state.session ? `<button class="link" data-act="edit-plan">${editPlan ? 'Fertig' : 'Bearbeiten'}</button>`
+  const action = tab === 'tasks' ? `<button class="link" data-act="edit-routines">${editRoutines ? 'Fertig' : 'Bearbeiten'}</button>`
+    : tab === 'gym' && !state.session ? `<button class="link" data-act="edit-plan">${editPlan ? 'Fertig' : 'Bearbeiten'}</button>`
     : tab === 'gym' && state.session ? '<button class="btn small" data-act="finish">Beenden</button>' : '';
   document.getElementById('top-action').innerHTML = action;
   view.innerHTML = tab === 'tasks' ? renderTasks() : tab === 'gym' ? renderGym() : tab === 'food' ? renderFood() : renderSettings();
@@ -123,7 +140,8 @@ function renderTasks() {
     </div>`;
   };
 
-  return `
+  return `${editRoutines ? renderRoutineEditor() : renderRoutines()}
+    <div class="section"><h2>To-dos</h2></div>
     <form class="adder" id="task-form">
       <input name="text" placeholder="Neue Aufgabe …" autocomplete="off" required>
       <button class="btn">+</button>
@@ -140,6 +158,86 @@ function renderTasks() {
         <div><button class="link" data-act="show-done">${showDone ? 'Ausblenden' : 'Anzeigen'}</button>
         ${showDone ? ' <button class="link" style="color:var(--danger)" data-act="clear-done">Leeren</button>' : ''}</div></div>
       ${showDone ? `<div class="card">${done.map(row).join('')}</div>` : ''}` : ''}`;
+}
+
+// ---------- Gewohnheiten & Haushalt ----------
+const habitDone = (id, date) => (state.habitLog[date] || []).includes(id);
+function habitStreak(id) {
+  let n = 0, d = today();
+  if (!habitDone(id, d)) d = addDays(d, -1); // heute noch offen bricht die Serie nicht
+  while (habitDone(id, d)) { n++; d = addDays(d, -1); }
+  return n;
+}
+function choreDue(c) { return c.last ? c.every - daysBetween(c.last, today()) : 0; }
+
+function renderRoutines() {
+  const t = today();
+  const week = Array.from({ length: 7 }, (_, i) => addDays(t, i - 6));
+  const habits = state.habits.map(h => {
+    const on = habitDone(h.id, t), streak = habitStreak(h.id);
+    return `<div class="item">
+      <button class="check ${on ? 'on' : ''}" data-act="habit" data-id="${h.id}" data-date="${t}">${on ? ICON.check : ''}</button>
+      <div class="text"><span>${esc(h.name)}</span><div class="sub">${streak ? `Serie: ${streak} ${streak === 1 ? 'Tag' : 'Tage'}` : 'Heute noch offen'}</div></div>
+      <div class="dots">${week.map(d => `<button class="dot ${habitDone(h.id, d) ? 'on' : ''} ${d === t ? 'today' : ''}" data-act="habit" data-id="${h.id}" data-date="${d}" aria-label="${fmtDate(d)}"></button>`).join('')}</div>
+    </div>`;
+  }).join('');
+
+  const chores = [...state.chores].sort((a, b) => choreDue(a) - choreDue(b)).map(c => {
+    const due = choreDue(c), doneToday = c.last === t;
+    const when = doneToday ? `erledigt · wieder in ${c.every} ${c.every === 1 ? 'Tag' : 'Tagen'}`
+      : !c.last ? 'noch nie erledigt'
+      : due < 0 ? `<span class="over">${-due} ${due === -1 ? 'Tag' : 'Tage'} überfällig</span>`
+      : due === 0 ? '<span class="over">heute fällig</span>' : due === 1 ? 'morgen fällig' : `in ${due} Tagen`;
+    return `<div class="item ${doneToday ? 'done' : ''}">
+      <button class="check ${doneToday ? 'on' : ''}" data-act="chore" data-id="${c.id}">${doneToday ? ICON.check : ''}</button>
+      <div class="text"><span>${esc(c.name)}</span><div class="sub">${when}</div></div>
+      <span class="muted">alle ${c.every} T.</span>
+    </div>`;
+  }).join('');
+
+  return `
+    ${habits ? `<div class="section"><h2>Täglich</h2><span class="muted">letzte 7 Tage</span></div><div class="card">${habits}</div>` : ''}
+    ${chores ? `<div class="section"><h2>Haushalt</h2></div><div class="card">${chores}</div>` : ''}`;
+}
+
+function renderRoutineEditor() {
+  return `
+    <div class="section"><h2>Täglich</h2></div>
+    <div class="card">${state.habits.map(h => `
+      <div class="item"><input class="grow" data-field="habit-name" data-id="${h.id}" value="${esc(h.name)}" placeholder="Gewohnheit">
+        <button class="icon-btn danger" data-act="del-habit" data-id="${h.id}" aria-label="Löschen">${ICON.trash}</button></div>`).join('')}
+      <button class="link" data-act="add-habit">+ Gewohnheit</button></div>
+    <div class="section"><h2>Haushalt</h2><span class="muted">Intervall in Tagen</span></div>
+    <div class="card">${state.chores.map(c => `
+      <div class="item"><input class="grow" data-field="chore-name" data-id="${c.id}" value="${esc(c.name)}" placeholder="Aufgabe">
+        <input class="num" data-field="chore-every" data-id="${c.id}" value="${c.every}" inputmode="numeric">
+        <button class="icon-btn danger" data-act="del-chore" data-id="${c.id}" aria-label="Löschen">${ICON.trash}</button></div>`).join('')}
+      <button class="link" data-act="add-chore">+ Aufgabe</button></div>`;
+}
+
+// ---------- Gym-Besuche ----------
+function visitDates() {
+  return new Set([...state.log.map(l => ymd(new Date(l.start))), ...state.visits]);
+}
+
+function renderVisits() {
+  const v = visitDates(), t = today();
+  const monday = addDays(t, -((new Date(t + 'T12:00').getDay() + 6) % 7));
+  const start = addDays(monday, -7 * 11); // 12 Wochen
+  const days = Array.from({ length: 84 }, (_, i) => addDays(start, i));
+  const inWeek = [...v].filter(d => d >= monday && d <= t).length;
+  const inMonth = [...v].filter(d => d.slice(0, 7) === t.slice(0, 7)).length;
+  const logged = new Set(state.log.map(l => ymd(new Date(l.start))));
+  return `<div class="card pad">
+    <div class="stats">
+      <div><b>${inWeek}</b><span class="muted">diese Woche</span></div>
+      <div><b>${inMonth}</b><span class="muted">diesen Monat</span></div>
+      <div><b>${v.size}</b><span class="muted">gesamt</span></div>
+    </div>
+    <div class="cal">${['M', 'D', 'M', 'D', 'F', 'S', 'S'].map(x => `<span class="muted">${x}</span>`).join('')}
+      ${days.map(d => `<button class="dot ${v.has(d) ? 'on' : ''} ${d === t ? 'today' : ''}" ${d > t || logged.has(d) ? 'disabled' : `data-act="visit" data-date="${d}"`} aria-label="${fmtDate(d)}"></button>`).join('')}</div>
+    <div class="muted" style="margin-top:6px">Trainings zählen automatisch. Tippe auf einen Tag, um einen Besuch nachzutragen.</div>
+  </div>`;
 }
 
 // ---------- Training ----------
@@ -195,7 +293,7 @@ function renderGym() {
       <button class="icon-btn" data-act="del-log" data-id="${l.id}" aria-label="Löschen">${ICON.trash}</button></div>`;
   }).join('');
 
-  return `${chips}
+  return `${renderVisits()}${chips}
     <div class="card">${rows || '<div class="empty">Keine Übungen. Tippe auf „Bearbeiten“.</div>'}</div>
     ${day.exercises.length ? `<button class="btn full" data-act="start" data-day="${day.id}">${esc(day.name)} starten</button>` : ''}
     ${hist ? `<div class="section"><h2>Verlauf</h2></div><div class="card">${hist}</div>` : ''}`;
@@ -423,6 +521,28 @@ document.addEventListener('click', e => {
       if (!confirm('Erledigte Aufgaben entfernen?')) return;
       state.tasks = state.tasks.filter(t => !(t.done && (listFilter === 'Alle' || t.list === listFilter))); break;
 
+    case 'edit-routines': editRoutines = !editRoutines; break;
+    case 'habit': {
+      const list = state.habitLog[el.dataset.date] || [];
+      state.habitLog[el.dataset.date] = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
+      if (!state.habitLog[el.dataset.date].length) delete state.habitLog[el.dataset.date];
+      break;
+    }
+    case 'chore': {
+      const c = state.chores.find(x => x.id === id);
+      if (c.last === today()) { c.last = c.prev ?? null; delete c.prev; } // nochmal tippen = rückgängig
+      else { c.prev = c.last; c.last = today(); }
+      break;
+    }
+    case 'add-habit': state.habits.push({ id: uid(), name: '' }); break;
+    case 'del-habit': state.habits = state.habits.filter(x => x.id !== id); break;
+    case 'add-chore': state.chores.push({ id: uid(), name: '', every: 7, last: null }); break;
+    case 'del-chore': state.chores = state.chores.filter(x => x.id !== id); break;
+    case 'visit': {
+      const dt = el.dataset.date;
+      state.visits = state.visits.includes(dt) ? state.visits.filter(x => x !== dt) : [...state.visits, dt]; break;
+    }
+
     case 'pick-day': gymDay = day; break;
     case 'edit-plan': editPlan = !editPlan; break;
     case 'add-day': { const nd = { id: uid(), name: `Tag ${state.plan.length + 1}`, exercises: [] }; state.plan.push(nd); gymDay = nd.id; break; }
@@ -471,7 +591,10 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   const el = e.target, f = el.dataset.field; if (!f) return;
   const v = el.value;
-  if (f.startsWith('goal-')) state.food.goals[f.slice(5)] = num(v);
+  if (f === 'habit-name') state.habits.find(x => x.id === el.dataset.id).name = v;
+  else if (f === 'chore-name') state.chores.find(x => x.id === el.dataset.id).name = v;
+  else if (f === 'chore-every') state.chores.find(x => x.id === el.dataset.id).every = Math.max(1, parseInt(v) || 1);
+  else if (f.startsWith('goal-')) state.food.goals[f.slice(5)] = num(v);
   else if (f === 'rest') state.settings.rest = Math.max(0, parseInt(v) || 0);
   else if (f === 'day-name') state.plan.find(x => x.id === el.dataset.day).name = v;
   else if (f === 's-reps' || f === 's-weight') {
