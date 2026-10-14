@@ -64,13 +64,13 @@ input, select, textarea {
 input[type=checkbox] { width: 24px; height: 24px; flex: none; accent-color: var(--accent); }
 input.num { width: 64px; text-align: center; padding: 8px 4px; }
 
-button.btn {
+.btn {
   font: inherit; font-weight: 600; border: 0; border-radius: 8px;
   padding: 10px 14px; background: var(--accent); color: #fff;
 }
-button.btn.secondary { background: var(--line); color: var(--text); }
-button.btn.danger { background: none; color: var(--danger); padding: 6px 8px; }
-button.btn.full { width: 100%; }
+.btn.secondary { background: var(--line); color: var(--text); }
+.btn.danger { background: none; color: var(--danger); padding: 6px 8px; }
+.btn.full { width: 100%; }
 button.link { border: 0; background: none; color: var(--accent); font: inherit; padding: 6px 0; }
 
 .chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
@@ -93,3 +93,9 @@ button.link { border: 0; background: none; color: var(--accent); font: inherit; 
 .timer { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 700; }
 
 .empty { text-align: center; color: var(--muted); padding: 24px 0; }
+
+.macro { margin-bottom: 8px; font-size: 14px; }
+.macro .over { color: var(--danger); font-weight: 600; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); margin-top: 3px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); }
+#food-form input.grow { padding: 9px 4px; text-align: center; }

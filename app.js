@@ -8,6 +8,7 @@ const defaults = () => ({
   log: [],        // {id, dayName, start, end, exercises: [{name, sets: [{reps, weight, done}]}]}
   session: null,  // laufendes Training, gleiche Form wie ein Log-Eintrag
   settings: { rest: 90 },
+  food: { goals: { kcal: 2298, p: 160, c: 292, f: 48 }, entries: [] }, // entries: {id, date, name, kcal, p, c, f}
 });
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -16,8 +17,8 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 // daher nur Platzhalter: 3 Sätze, Wiederholungen leer.
 const START_PLAN = [
   ['Push', ['Beinpresse', 'Wadenheben an der Beinpresse', 'Schrägbankdrücken an der Multipresse', 'Schulterpresse', 'Unterarmstütz']],
-  ['Pull', ['Butterfly Reverse', 'Seitstütz', 'Rückenstrecker Maschine']],
-  ['Full Body', ['Hürdensitz', 'Fußkreisen', 'Handlauf', 'Beinpresse', 'Beinbeuger im Sitzen', 'Breites Latziehen im neutralen Griff', 'Kurzhantel-Schrägbankdrücken']],
+  ['Pull', ['Beinbeuger im Liegen', 'Low Row', 'Latzug', 'Butterfly Reverse', 'Seitstütz', 'Rückenstrecker Maschine']],
+  ['Full Body', ['Hürdensitz', 'Fußkreisen', 'Handlauf', 'Beinpresse', 'Beinbeuger im Sitzen', 'Breites Latziehen im neutralen Griff', 'Kurzhantel-Schrägbankdrücken', 'Enger 90/90 Sitz mit Hüftextension', 'Schrauben Mobilisierung', 'Side Stretch']],
 ];
 
 let state = load();
@@ -37,8 +38,10 @@ function load() {
 function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const today = () => new Date().toISOString().slice(0, 10);
-const fmtDate = iso => new Date(iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+// Lokales Datum als YYYY-MM-DD (toISOString wäre UTC und nach Mitternacht noch "gestern").
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const today = () => ymd(new Date());
+const fmtDate = iso => new Date(typeof iso === 'string' && iso.length === 10 ? iso + 'T12:00' : iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
 const fmtDur = ms => { const s = Math.max(0, Math.floor(ms / 1000)); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; };
 
 // ---------- UI-Zustand (nicht gespeichert) ----------
@@ -47,14 +50,15 @@ let listFilter = 'Alle';
 let showDone = false;
 let editPlan = false;
 let restEnd = 0;
+let foodDate = today();
 
 const view = document.getElementById('view');
-const titles = { tasks: 'Aufgaben', gym: 'Training', settings: 'Mehr' };
+const titles = { tasks: 'Aufgaben', gym: 'Training', food: 'Ernährung', settings: 'Mehr' };
 
 function render() {
   document.getElementById('title').textContent = titles[tab];
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  view.innerHTML = tab === 'tasks' ? renderTasks() : tab === 'gym' ? renderGym() : renderSettings();
+  view.innerHTML = tab === 'tasks' ? renderTasks() : tab === 'gym' ? renderGym() : tab === 'food' ? renderFood() : renderSettings();
 }
 
 // ---------- Aufgaben ----------
@@ -197,9 +201,54 @@ function startSession(dayId) {
   };
 }
 
+// ---------- Ernährung ----------
+const MACROS = [['kcal', 'Kcal', ''], ['p', 'Protein', 'g'], ['c', 'KH', 'g'], ['f', 'Fett', 'g']];
+const num = v => parseFloat(String(v).replace(',', '.')) || 0;
+
+function renderFood() {
+  const { goals, entries } = state.food;
+  const day = entries.filter(x => x.date === foodDate);
+  const sum = k => day.reduce((n, x) => n + x[k], 0);
+  const shift = n => { const d = new Date(foodDate + 'T12:00'); d.setDate(d.getDate() + n); return ymd(d); };
+
+  // Zuletzt gegessen: letzte Version je Name, für schnelles Hinzufügen.
+  const recent = [];
+  for (let i = entries.length - 1; i >= 0 && recent.length < 12; i--)
+    if (!recent.some(r => r.name.toLowerCase() === entries[i].name.toLowerCase())) recent.push(entries[i]);
+
+  const bars = MACROS.map(([k, label, unit]) => {
+    const v = Math.round(sum(k)), g = goals[k] || 0, pct = g ? Math.min(100, v / g * 100) : 0;
+    return `<div class="macro"><div class="row"><span class="grow">${label}</span><span class="${g && v > g ? 'over' : ''}">${v} / ${g}${unit}</span></div>
+      <div class="bar"><div style="width:${pct}%"></div></div></div>`;
+  }).join('');
+
+  return `
+    <div class="card row">
+      <button class="btn secondary" data-act="food-day" data-date="${shift(-1)}">‹</button>
+      <button class="link grow" data-act="food-day" data-date="${today()}">${foodDate === today() ? 'Heute' : fmtDate(foodDate)}</button>
+      <button class="btn secondary" data-act="food-day" data-date="${shift(1)}">›</button>
+    </div>
+    <div class="card">${bars}<div class="muted" style="margin-top:6px">Übrig: ${Math.round(goals.kcal - sum('kcal'))} kcal</div></div>
+    <form class="card" id="food-form">
+      <input name="name" placeholder="Mahlzeit" autocomplete="off" required>
+      <div class="row" style="margin-top:8px">
+        ${MACROS.map(([k, label]) => `<input class="grow" name="${k}" placeholder="${label}" inputmode="decimal">`).join('')}
+      </div>
+      <button class="btn full" style="margin-top:8px">Hinzufügen</button>
+    </form>
+    ${recent.length ? `<div class="chips">${recent.map(r => `<button class="chip" data-act="food-again" data-id="${r.id}">+ ${esc(r.name)}</button>`).join('')}</div>` : ''}
+    <div class="card">${day.length ? day.map(x => `<div class="task"><div class="text">${esc(x.name)}
+      <div class="due">${Math.round(x.kcal)} kcal · P ${x.p} · K ${x.c} · F ${x.f}</div></div>
+      <button class="btn danger" data-act="del-food" data-id="${x.id}">Löschen</button></div>`).join('') : '<div class="empty">Noch nichts eingetragen.</div>'}</div>`;
+}
+
 // ---------- Mehr ----------
 function renderSettings() {
   return `
+    <div class="card">
+      <h3>Tagesziel Ernährung</h3>
+      <div class="row">${MACROS.map(([k, label, unit]) => `<label class="grow muted">${label}${unit ? ' (' + unit + ')' : ''}<input data-field="goal-${k}" value="${state.food.goals[k]}" inputmode="decimal"></label>`).join('')}</div>
+    </div>
     <div class="card">
       <h3>Pausentimer</h3>
       <div class="row"><input class="num" data-field="rest" value="${state.settings.rest}" inputmode="numeric"><span class="muted">Sekunden nach jedem abgehakten Satz</span></div>
@@ -208,7 +257,7 @@ function renderSettings() {
       <h3>Backup</h3>
       <p class="muted">Daten liegen nur auf diesem Gerät (im Browser). Löscht du die Website-Daten in Safari, sind sie weg. Exportiere regelmäßig.</p>
       <button class="btn" data-act="export">Exportieren</button>
-      <label class="btn secondary" style="display:inline-block">Importieren<input type="file" accept="application/json" id="import" hidden></label>
+      <label class="btn secondary" style="display:inline-block;margin-left:6px">Importieren<input type="file" accept="application/json" id="import" hidden></label>
     </div>
     <div class="card">
       <h3>Installieren</h3>
@@ -223,6 +272,12 @@ document.querySelector('.tabs').addEventListener('click', e => {
 });
 
 view.addEventListener('submit', e => {
+  if (e.target.id === 'food-form') {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    state.food.entries.push({ id: uid(), date: foodDate, name: f.get('name').trim(), kcal: num(f.get('kcal')), p: num(f.get('p')), c: num(f.get('c')), f: num(f.get('f')) });
+    save(); render(); return;
+  }
   if (e.target.id !== 'task-form') return;
   e.preventDefault();
   const f = new FormData(e.target);
@@ -271,6 +326,12 @@ view.addEventListener('click', e => {
     }
     case 'cancel': if (!confirm('Training verwerfen?')) return; state.session = null; restEnd = 0; break;
     case 'del-log': if (!confirm('Eintrag löschen?')) return; state.log = state.log.filter(x => x.id !== id); break;
+    case 'food-day': foodDate = el.dataset.date; break;
+    case 'food-again': {
+      const src = state.food.entries.find(x => x.id === id);
+      state.food.entries.push({ ...src, id: uid(), date: foodDate }); break;
+    }
+    case 'del-food': state.food.entries = state.food.entries.filter(x => x.id !== id); break;
     case 'export': exportData(); return;
     default: return;
   }
@@ -281,7 +342,8 @@ view.addEventListener('click', e => {
 view.addEventListener('input', e => {
   const el = e.target, f = el.dataset.field; if (!f) return;
   const v = el.value;
-  if (f === 'rest') state.settings.rest = Math.max(0, parseInt(v) || 0);
+  if (f.startsWith('goal-')) state.food.goals[f.slice(5)] = num(v);
+  else if (f === 'rest') state.settings.rest = Math.max(0, parseInt(v) || 0);
   else if (f === 'day-name') state.plan.find(x => x.id === el.dataset.day).name = v;
   else if (f === 's-reps' || f === 's-weight') {
     const st = state.session.exercises[el.dataset.ei].sets[el.dataset.si];
