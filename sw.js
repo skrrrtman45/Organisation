@@ -1,5 +1,5 @@
 // Offline-Cache: App läuft im Gym auch ohne Netz.
-const CACHE = 'organisation-v1';
+const CACHE = 'organisation-v2';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

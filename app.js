@@ -10,7 +10,24 @@ const defaults = () => ({
   settings: { rest: 90 },
 });
 
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+// Startplan aus den Screenshots. Sätze/Wdh./Gewichte fehlen noch ("Krafttest"),
+// daher nur Platzhalter: 3 Sätze, Wiederholungen leer.
+const START_PLAN = [
+  ['Push', ['Beinpresse', 'Wadenheben an der Beinpresse', 'Schrägbankdrücken an der Multipresse', 'Schulterpresse', 'Unterarmstütz']],
+  ['Pull', ['Butterfly Reverse', 'Seitstütz', 'Rückenstrecker Maschine']],
+  ['Full Body', ['Hürdensitz', 'Fußkreisen', 'Handlauf', 'Beinpresse', 'Beinbeuger im Sitzen', 'Breites Latziehen im neutralen Griff', 'Kurzhantel-Schrägbankdrücken']],
+];
+
 let state = load();
+if (!state.seeded && !state.plan.length) {
+  state.plan = START_PLAN.map(([name, exs]) => ({
+    id: uid(), name, exercises: exs.map(n => ({ id: uid(), name: n, sets: 3, reps: '', weight: null })),
+  }));
+}
+state.seeded = true;
+save();
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
@@ -19,7 +36,6 @@ function load() {
 }
 function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
 
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = () => new Date().toISOString().slice(0, 10);
 const fmtDate = iso => new Date(iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
@@ -100,7 +116,7 @@ function renderGym() {
   const days = state.plan.map(d => `
     <div class="card">
       <div class="row"><h3 class="grow">${esc(d.name)}</h3><button class="btn" data-act="start" data-id="${d.id}">Starten</button></div>
-      ${d.exercises.map(e => `<div class="muted">${esc(e.name)} – ${e.sets}×${esc(e.reps)}${e.weight ? ` @ ${e.weight} kg` : ''}</div>`).join('') || '<div class="muted">Keine Übungen</div>'}
+      ${d.exercises.map(e => `<div class="muted">${esc(e.name)} – ${e.sets}×${esc(e.reps || '?')}${e.weight ? ` @ ${e.weight} kg` : ''}</div>`).join('') || '<div class="muted">Keine Übungen</div>'}
     </div>`).join('');
 
   const hist = state.log.slice(-10).reverse().map(l => {
@@ -176,7 +192,7 @@ function startSession(dayId) {
     exercises: d.exercises.map(e => {
       const last = lastFor(e.name);
       const w = last ? last[last.length - 1].weight : (e.weight ?? '');
-      return { name: e.name, target: `${e.sets}×${e.reps}`, sets: Array.from({ length: Number(e.sets) || 1 }, () => ({ reps: '', weight: w, done: false })) };
+      return { name: e.name, target: `${e.sets}×${e.reps || '?'}`, sets: Array.from({ length: Number(e.sets) || 1 }, () => ({ reps: '', weight: w, done: false })) };
     }),
   };
 }
